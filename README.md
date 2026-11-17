@@ -25,7 +25,7 @@ python main.py
 
 ## Validation 결과 (PESQ-WB)
 
-전체 평균: `validation_summary.csv`
+전체 평균: `validation_summary.csv` <br>
 파일별 결과: `validation_scores.csv`
 
 | 방법          | PESQ      | SNR (dB)  |
