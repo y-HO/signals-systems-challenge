@@ -21,9 +21,8 @@ from tqdm import tqdm
 from algorithm import SAMPLE_RATE, enhance
 from reference import NoiseLibrary
 
-GOOD_MATCH_DB = 3.0  # 이만큼 넘게 잡음 바닥이 줄면 "잘 맞음"
-GOOD_MATCH_COVERAGE = 0.90  # 그리고 파일의 90% 이상을 덮어야 함
-PARTIAL_MATCH_DB = 1.0  # 이만큼 넘게 줄면 "일부 맞음"
+MATCH_DB = 1.0  # 차감 후 잡음 바닥이 이만큼 넘게 줄면 "잘 맞음"
+CROSSFADE = 801  # 차감 구간과 필터 구간 경계를 부드럽게 잇는 창 길이 (50 ms)
 
 
 def noise_floor(x, frame=512, hop=256):
@@ -38,11 +37,15 @@ def denoise_channel(x, library):
     noise, covered = library.estimate_noise(x)
     residual = x - noise
     floor_drop_db = 10 * np.log10(noise_floor(x) / max(noise_floor(residual), 1e-20))
-    if floor_drop_db > GOOD_MATCH_DB and covered.mean() >= GOOD_MATCH_COVERAGE:
-        return residual
-    if floor_drop_db > PARTIAL_MATCH_DB:
-        return enhance(residual)
-    return enhance(x)
+    if floor_drop_db > MATCH_DB:
+        # 잘 맞음: 잡음을 찾은 구간은 차감 결과, 못 찾은 구간은 통계적 필터 결과를 쓰고
+        # 경계는 Hann 창으로 부드럽게 섞는다
+        window = np.hanning(CROSSFADE)
+        weight = np.convolve(covered.astype(float), window / window.sum(), mode="same")
+        return weight * residual + (1 - weight) * enhance(x)
+    if floor_drop_db > 0:
+        return enhance(residual)  # 조금 맞음: 차감 후 남은 잡음을 필터로 정리
+    return enhance(x)  # 안 맞음 (라이브러리에 없는 잡음): 필터만 사용
 
 
 def denoise_file(src, dst, library):

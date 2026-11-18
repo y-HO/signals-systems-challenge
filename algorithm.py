@@ -8,6 +8,7 @@
 4. 하모닉 재생성: 1차 결과를 반파 정류해 음성 하모닉을 되살린 뒤 사전 SNR을 다시 계산
                                                                      [Plapous, Marro, Scalart 2006]
 5. 창 길이 1024 / 2048 두 가지로 2~4를 수행하고 결과를 평균
+6. 다중대역 스펙트럼 차감 결과(창 1024/2048 평균)를 30% 섞음   [Kamath & Loizou 2002]
 """
 
 import numpy as np
@@ -26,6 +27,9 @@ FINAL_GAIN_FLOOR_DB = -30.0  # 최종 이득의 최소값
 MIN_PRIOR_SNR_DB = -25.0  # 사전 SNR 하한
 HARMONIC_RHO = 0.3  # 하모닉 재생성 섞는 비율 (0.3 = 1차 결과 30%, 재생성 70%)
 HIGHPASS_HZ = 100.0  # 고역통과 차단 주파수 (바람·엔진 저역 잡음 제거)
+MBSS_WEIGHT = 0.30  # 최종 출력에서 다중대역 스펙트럼 차감 결과가 차지하는 비율
+MBSS_BANDS = 4  # 다중대역 차감의 대역 수 (주파수 축을 같은 폭으로 4등분)
+MBSS_FLOOR = 0.002  # 차감 후 음수가 되면 원래 파워의 0.2%만 남김 (스펙트럼 바닥)
 
 
 def db_to_amplitude(db):
@@ -143,11 +147,43 @@ def enhance_one_resolution(x, n_fft):
     return istft(final_gain * spec, length, n_fft)
 
 
+def multiband_subtraction(x, n_fft):
+    """다중대역 스펙트럼 차감 [Kamath & Loizou 2002]
+    대역마다 SNR을 보고 과차감 계수 α를 다르게 정한다 (SNR 낮을수록 많이 뺌).
+    고주파 대역은 음성 에너지가 적으므로 추가 계수 δ로 더 세게 뺀다."""
+    length = len(x)
+    spec = stft(x, n_fft)
+    magnitude = np.abs(spec)
+    smooth = magnitude.copy()  # 시간 방향 3프레임 가중 평균
+    smooth[:, 1:-1] = (
+        0.25 * magnitude[:, :-2] + 0.5 * magnitude[:, 1:-1] + 0.25 * magnitude[:, 2:]
+    )
+    power = smooth**2
+    noise = estimate_noise_psd(magnitude**2, n_fft)
+    edges = np.linspace(0, power.shape[0], MBSS_BANDS + 1).astype(int)
+    clean = np.empty_like(power)
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        band_snr = 10 * np.log10(power[lo:hi].sum(axis=0) / noise[lo:hi].sum() + 1e-12)
+        alpha = np.where(
+            band_snr < -5, 5.0, np.where(band_snr > 20, 1.0, 4 - 3 * band_snr / 20)
+        )
+        top_hz = hi * SAMPLE_RATE / n_fft
+        delta = (
+            1.0
+            if top_hz <= 1000
+            else (2.5 if top_hz <= SAMPLE_RATE / 2 - 2000 else 1.5)
+        )
+        subtracted = power[lo:hi] - alpha * delta * noise[lo:hi, None]
+        clean[lo:hi] = np.where(subtracted > 0, subtracted, MBSS_FLOOR * power[lo:hi])
+    return istft(np.sqrt(clean) * np.exp(1j * np.angle(spec)), length, n_fft)
+
+
 def enhance(noisy):
     """모노 16 kHz 신호의 잡음 제거. 출력 길이는 입력과 정확히 같다."""
     x = highpass(np.asarray(noisy, dtype=np.float64))
     length = len(x)
     if length < max(FFT_SIZES):  # 아주 짧은 입력 대비
         x = np.pad(x, (0, max(FFT_SIZES) - length))
-    outputs = [enhance_one_resolution(x, n) for n in FFT_SIZES]
-    return np.mean(outputs, axis=0)[:length]
+    hrnr = np.mean([enhance_one_resolution(x, n) for n in FFT_SIZES], axis=0)
+    mbss = np.mean([multiband_subtraction(x, n) for n in FFT_SIZES], axis=0)
+    return ((1 - MBSS_WEIGHT) * hrnr + MBSS_WEIGHT * mbss)[:length]
