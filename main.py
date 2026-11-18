@@ -81,7 +81,9 @@ def main():
     out_dir = HERE / f"output_{args.split}"
     out_dir.mkdir(exist_ok=True)
 
-    print(f"{len(rows)}개 처리 시작 (파일당 약 4초, 작업자 {args.workers}개)...")
+    print(
+        f"{len(rows)}개 처리 시작 (작업자 {args.workers}개, 예상 약 {len(rows) * 4 / args.workers / 60:.1f}분)..."
+    )
     with Pool(args.workers, initializer=init, initargs=(args.data, out_dir)) as pool:
         result = pd.DataFrame(pool.map(process, rows.to_dict("records"), chunksize=2))
 
