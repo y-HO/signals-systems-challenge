@@ -12,18 +12,63 @@
 
 ```bash
 pip install -r requirements.txt
-python denoise.py --input input --output output
+python denoise.py
 ```
 
 - `input/` 안의 모든 WAV(하위 폴더 포함)를 처리해 같은 상대 경로·파일명으로 `output/`에 저장합니다.
-- 경로를 생략하면 최상위 `signals-systems-challenge` 폴더의 `input/`, `output/`을 사용합니다.
+- `output/` 폴더는 자동으로 만들어집니다.
 
-## Validation 점수 재현 / noise_library 재생성
+| 옵션       | 기본값   | 설명                               |
+| ---------- | -------- | ---------------------------------- |
+| `--input`  | `input`  | 잡음을 제거할 WAV가 들어 있는 폴더 |
+| `--output` | `output` | 결과 WAV를 저장할 폴더             |
 
 ```bash
-python evaluate.py --data . --split validation
+python denoise.py --input 입력폴더경로 --output 출력폴더경로
+```
+
+경로를 생략하면 최상위 `signals-systems-challenge` 폴더의 `input/`, `output/`을 사용합니다.
+
+## Validation 점수 재현
+
+최상위 폴더에 `validation/` 폴더를 넣은 뒤 실행합니다.
+
+```bash
+python main.py
+```
+
+`main.py`는 아래 과정을 한 번에 실행합니다.
+
+1. `validation/`(또는 `train/`)의 noisy WAV 전부 잡음 제거
+2. 결과 WAV를 `output_validation/`에 저장 (noisy 파일과 같은 이름)
+3. clean과 비교해 파일마다 PESQ·SNR 계산
+4. 파일별 결과는 `validation_scores.csv`, 전체 평균은 `validation_summary.csv`로 저장하고 터미널에 평균 PESQ 출력
+
+| 옵션        | 기본값            | 설명                                                                          |
+| ----------- | ----------------- | ----------------------------------------------------------------------------- |
+| `--data`    | `.` (최상위 폴더) | `validation/`(또는 `train/`) 폴더가 있는 위치                                 |
+| `--split`   | `validation`      | 평가할 데이터 (`validation` 또는 `train`)                                     |
+| `--workers` | `2`               | 동시에 처리할 작업자 수. 늘리면 빨라지며, 작업자 하나당 메모리 약 1.2 GB 사용 |
+| `--limit`   | 전체              | 앞에서부터 N개만 처리 (빠른 시험용)                                           |
+
+```bash
+python main.py --workers 6        # 6개 동시 처리 (164개 약 2분)
+python main.py --limit 10         # 앞 10개만 빠르게 확인
+python main.py --split train      # train 데이터로 평가 (결과는 output_train/, train_scores.csv)
+```
+
+## noise_library 재생성
+
+`noise_library/`는 이미 포함되어 있어 다시 만들 필요가 없습니다. 지워졌을 때만 최상위 폴더에 `train/` 폴더를 넣고 실행합니다.
+
+```bash
 python build_noise_library.py --data .
 ```
+
+| 옵션     | 기본값          | 설명                      |
+| -------- | --------------- | ------------------------- |
+| `--data` | (필수)          | `train/` 폴더가 있는 위치 |
+| `--out`  | `noise_library` | 라이브러리를 저장할 폴더  |
 
 ## Validation 결과 (PESQ-WB)
 
@@ -37,12 +82,12 @@ python build_noise_library.py --data .
 
 ## 알고리즘
 
-1. **참조 잡음 탐색 (`reference.py`)**: FFT 기반 상호상관(정합 필터)으로 입력과 가장 잘 맞는 라이브러리 잡음 구간과 시간 지연을 찾고, 최대 3개 구간을 이어 파일 전체를 덮습니다. 크기는 최소제곱으로 맞춘 뒤 입력에서 뺍니다.
+1. **참조 잡음 탐색 (`reference.py`)**: FFT 기반 상호상관(정합 필터)으로 입력과 가장 잘 맞는 라이브러리 잡음 구간과 시간 지연을 찾고, 최대 3개 구간을 이어 파일 전체를 덮습니다. 크기는 구간마다 최소제곱으로 맞춘 뒤 입력에서 뺍니다.
 2. **매칭 품질 판단 (`denoise.py`)**: 차감 전후 잡음 바닥(가장 조용한 10% 프레임의 평균 파워)의 감소량으로 판단합니다.
-   - 3 dB 초과 감소 + 90% 이상 커버 → 차감 결과 사용
-   - 1 dB 초과 감소 → 차감 후 남은 잡음을 통계적 필터로 제거
+   - 1 dB 초과 감소 → 잡음을 찾은 구간은 차감 결과, 못 찾은 구간은 통계적 필터 결과 사용 (경계는 50 ms 창으로 부드럽게 연결)
+   - 조금이라도 감소 → 차감 후 남은 잡음을 통계적 필터로 제거
    - 그 외(라이브러리에 없는 잡음) → 통계적 필터만 사용
-3. **통계적 필터 (`algorithm.py`)**: 100 Hz 고역통과 → STFT → 저에너지 프레임 기반 잡음 PSD → decision-directed log-MMSE → harmonic regeneration → 1024/2048 창 결과 평균
+3. **통계적 필터 (`algorithm.py`)**: 100 Hz 고역통과 → STFT → 저에너지 프레임 기반 잡음 PSD → decision-directed log-MMSE → harmonic regeneration → 1024/2048 창 결과 평균 → 다중대역 스펙트럼 차감 결과 30% 섞기
 
 ## 참고 문헌
 
@@ -51,4 +96,5 @@ python build_noise_library.py --data .
 - Y. Ephraim, D. Malah, IEEE Trans. ASSP, 32(6), 1109–1121, 1984. doi:10.1109/TASSP.1984.1164453
 - Y. Ephraim, D. Malah, IEEE Trans. ASSP, 33(2), 443–445, 1985. doi:10.1109/TASSP.1985.1164550
 - C. Plapous, C. Marro, P. Scalart, IEEE Trans. ASLP, 14(6), 2098–2108, 2006. doi:10.1109/TASL.2006.872621
+- S. Kamath, P. Loizou, "A multi-band spectral subtraction method for enhancing speech corrupted by colored noise," Proc. IEEE ICASSP, 2002, p. IV-4164.
 - P. C. Loizou, _Speech Enhancement: Theory and Practice_, 2nd ed., CRC Press, 2013.
